@@ -6,7 +6,36 @@ The interface takes its blue (`#234e91`) from Initium. Changed files sit in a ce
 
 ![Jammygit workspace with sample changes](docs/preview.png)
 
-## Run
+## Install a release
+
+Releases contain native binaries for macOS (Apple Silicon and Intel, macOS 11+) and Linux (ARM64 and x86-64). Linux binaries are statically linked with musl. Rust is not needed to install a release; Git must already be on your PATH.
+
+For a public repository, once the first release is published:
+
+```sh
+curl -fsSL https://github.com/initiumailab/jammygit/releases/latest/download/install.sh | bash
+```
+
+For a private repository, use authenticated [GitHub CLI](https://cli.github.com/):
+
+```sh
+jammygit_installer_dir="$(mktemp -d)"
+gh release download --repo initiumailab/jammygit --pattern install.sh --dir "$jammygit_installer_dir"
+bash "$jammygit_installer_dir/install.sh"
+rm -rf "$jammygit_installer_dir"
+```
+
+The installer detects your platform, downloads the matching archive, verifies SHA-256 and the binary version, then installs atomically to `~/.local/bin/jammygit`. It uses authenticated `gh` when available, otherwise curl for public releases. It requires no sudo and leaves shell configuration files alone. If needed, it prints the command to add the installation directory to PATH. `NO_COLOR=1` disables color and animated progress.
+
+To pin a version or choose a directory after downloading the installer:
+
+```sh
+bash install.sh --version v0.1.0 --bin-dir "$HOME/.local/bin"
+```
+
+Run `bash install.sh --help` for all options, including installing from a fork with `--repo OWNER/REPO`.
+
+## Run from source
 
 Requires a current stable Rust toolchain, Git 2.23+, and an interactive terminal (at least 64 × 18; 100 × 30 recommended).
 
@@ -73,6 +102,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build
 python3 scripts/smoke_test.py
+python3 -m unittest discover -s tests -p 'test_release*.py' -v
 ```
 
 To measure navigation handlers and rendering with 5,000 changed files:
@@ -94,3 +124,25 @@ swift scripts/render_preview.swift /tmp/jammygit-preview/diff.cells docs/diff-pr
 This renders the actual Ratatui cell buffer, including its colors, into a PNG. The preview exporter also produces compact, open-drawer, commit-composer, and Git-activity screens for visual review.
 
 Workflow tests use disposable repositories and local bare remotes. They cover staged-only and first commits, Unicode messages, rejected hooks, unusual filenames, renames, stale confirmations, push destinations, rejected pushes, fast-forward and diverged pulls, conflicts, and linked worktrees. Embedded-terminal tests cover commits, prompts, input, resizing, failure output, and interruption. UI tests cover arrow-key selection, drawer controls, and draft retention after a rejected commit. The Unix PTY smoke test (Python 3.11+) drives the actual TUI through stage → multiline commit with an embedded hook prompt → one-key push with another embedded prompt → one-key pull. It verifies all three operations stay in the TUI and the terminal is restored on exit. Real hosting-provider authentication and signing depend on your local Git setup.
+
+## Publishing a release
+
+After this project and its workflows are committed and pushed to GitHub, push a version tag matching `Cargo.toml`:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The release workflow runs CI first, then builds and exercises four native release binaries. It publishes these archives with `install.sh` and `SHA256SUMS`:
+
+| Platform | Asset |
+| --- | --- |
+| macOS Apple Silicon | `jammygit-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `jammygit-x86_64-apple-darwin.tar.gz` |
+| Linux ARM64 | `jammygit-aarch64-unknown-linux-musl.tar.gz` |
+| Linux x86-64 | `jammygit-x86_64-unknown-linux-musl.tar.gz` |
+
+Only the publish job has write access, using the built-in `GITHUB_TOKEN`; no release token secret is needed. Archives are reproducible for the same binary and source files. All assets are uploaded to a draft before it is published, so incomplete uploads stay unpublished. Reruns can repair a draft but will not overwrite a published release. Prerelease versions such as `0.2.0-rc.1` are marked as prereleases and do not replace the latest stable release.
+
+For subsequent versions, update the package version in `Cargo.toml` and `Cargo.lock`, commit the changes, then push the matching `v…` tag. A mismatched tag fails before packaging.

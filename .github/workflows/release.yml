@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Validate version tag
+        run: python3 scripts/release.py version --tag "$RELEASE_TAG"
+      - name: Install Linux static linker
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
+          echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
+      - name: Build release binary
+        run: cargo build --locked --release --target "$TARGET"
+      - name: Exercise native release binary
+        run: |
+          "target/$TARGET/release/jammygit" --version
+          python3 scripts/smoke_test.py "target/$TARGET/release/jammygit"
+      - name: Package release
+        run: python3 scripts/release.py package --tag "$RELEASE_TAG" --target "$TARGET" --binary "target/$TARGET/release/jammygit" --out dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jammygit-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: jammygit-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Assemble checksums
+        run: |
+          cp install.sh dist/install.sh
+          python3 scripts/release.py checksums --directory dist
+      - name: Publish complete release
+        run: bash scripts/publish-release.sh
