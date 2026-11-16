@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import select
+import shlex
 import shutil
 import subprocess
 import sys
@@ -45,7 +46,8 @@ elif name == 'gh':
 elif name == 'curl':
     if '--write-out' in args: print('https://github.com/initiumailab/jammygit/releases/tag/v0.1.0', end='')
     else:
-        if os.environ.get('MOCK_DOWNLOAD_FAIL'): print('mock HTTP 404', file=sys.stderr); sys.exit(22)
+        failure = os.environ.get('MOCK_DOWNLOAD_FAIL')
+        if failure and (failure != 'archive' or args[-1].endswith('.tar.gz')): print('mock HTTP 404', file=sys.stderr); sys.exit(22)
         output = pathlib.Path(args[args.index('--output')+1])
         shutil.copyfile(assets / args[-1].rsplit('/', 1)[-1], output)
 '''
@@ -196,7 +198,8 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(any(r[0] == "curl" for r in self.requests()))
 
     def test_macos_shasum_fallback_without_gnu_coreutils(self):
-        for name in ["bash", "tar", "awk", "git", "mkdir", "rm", "cp", "chmod", "mv", "mktemp", "cat", "sleep", "shasum"]:
+        # GNU tar invokes gzip via PATH; bsdtar on macOS decompresses internally.
+        for name in ["bash", "tar", "gzip", "awk", "git", "mkdir", "rm", "cp", "chmod", "mv", "mktemp", "cat", "sleep", "shasum"]:
             location = shutil.which(name)
             if not location: self.skipTest(f"{name} is unavailable")
             (self.tools / name).symlink_to(location)
@@ -220,6 +223,35 @@ class ReleaseTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.destination / "jammygit").exists())
 
+    def test_failed_extraction_never_executes_or_installs_partial_binary(self):
+        self.destination.mkdir()
+        installed = self.destination / "jammygit"
+        installed.write_text("old version")
+        marker = self.root / "partial-binary-ran"
+        partial = f"#!/bin/sh\necho 'jammygit 0.1.0'\nprintf ran > {shlex.quote(str(marker))}\n"
+        tar = self.tools / "tar"
+        tar.write_text(f"#!{sys.executable}\nimport sys\nsys.stdout.write({partial!r})\nsys.stderr.write('mock extraction failed\\n')\nsys.exit(2)\n")
+        tar.chmod(0o755)
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mock extraction failed", result.stderr)
+        self.assertNotIn("version mismatch", result.stderr)
+        self.assertFalse(marker.exists())
+        self.assertEqual(installed.read_text(), "old version")
+
+    def test_failed_copy_preserves_existing_install(self):
+        self.destination.mkdir()
+        installed = self.destination / "jammygit"
+        installed.write_text("old version")
+        cp = self.tools / "cp"
+        cp.write_text("#!/bin/sh\necho 'mock copy failed' >&2\nexit 1\n")
+        cp.chmod(0o755)
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mock copy failed", result.stderr)
+        self.assertEqual(installed.read_text(), "old version")
+        self.assertFalse(list(self.destination.glob(".jammygit.*")))
+
     def test_binary_version_mismatch_preserves_existing_install(self):
         # Modify an otherwise valid archive and regenerate its trusted manifest.
         self.binary.write_text("#!/bin/sh\necho 'jammygit 9.9.9'\n")
@@ -240,6 +272,12 @@ class ReleaseTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Downloading release failed", result.stderr)
         self.assertFalse((self.destination / "jammygit").exists())
+
+    def test_failed_archive_download_stops_before_requesting_checksums(self):
+        result = self.install(env={"MOCK_DOWNLOAD_FAIL": "archive"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Downloading release failed", result.stderr)
+        self.assertFalse(any(r[0] == "curl" and r[-1].endswith("SHA256SUMS") for r in self.requests()))
 
     def test_unsupported_platform_and_invalid_arguments_do_not_download(self):
         for args, env in [((), {"MOCK_OS": "FreeBSD"}), ((), {"MOCK_ARCH": "armv7l"}), (("--version", "../../bad"), {}), (("--repo", "bad;command"), {})]:

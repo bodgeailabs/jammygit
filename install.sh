@@ -78,7 +78,7 @@ download_files() {
   else
     local base="https://github.com/$repository/releases/download/$tag"
     curl --fail --silent --show-error --location --retry 3 --connect-timeout 15 --max-time 180 \
-      --proto '=https' --proto-redir '=https' --output "$temporary/$asset" "$base/$asset"
+      --proto '=https' --proto-redir '=https' --output "$temporary/$asset" "$base/$asset" || return 1
     curl --fail --silent --show-error --location --retry 3 --connect-timeout 15 --max-time 60 \
       --proto '=https' --proto-redir '=https' --output "$temporary/SHA256SUMS" "$base/SHA256SUMS"
   fi
@@ -100,8 +100,10 @@ verify_archive() {
 
 install_binary() {
   # Stream only the binary member; archive paths are never extracted onto disk.
-  tar -xOzf "$temporary/$asset" -- jammygit > "$temporary/jammygit"
-  chmod 755 "$temporary/jammygit"
+  # run_step checks this function in an `if`, which disables implicit errexit.
+  # Propagate failures explicitly before running or replacing any binary.
+  tar -xOzf "$temporary/$asset" -- jammygit > "$temporary/jammygit" || return 1
+  chmod 755 "$temporary/jammygit" || return 1
   local actual
   actual=$("$temporary/jammygit" --version) || {
     printf 'The downloaded binary cannot run on this system.\n' >&2
@@ -111,8 +113,8 @@ install_binary() {
     printf 'Binary version mismatch: expected %s, got %s\n' "${tag#v}" "$actual" >&2
     return 1
   }
-  cp -- "$temporary/jammygit" "$staged_binary"
-  chmod 755 "$staged_binary"
+  cp -- "$temporary/jammygit" "$staged_binary" || return 1
+  chmod 755 "$staged_binary" || return 1
   mv -f -- "$staged_binary" "$install_dir/jammygit"
 }
 
