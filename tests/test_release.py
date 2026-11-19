@@ -58,6 +58,14 @@ class ReleaseTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="jammygit-installer-test-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        # Fake 0.1.0 assets belong to a fake project, independent of the real
+        # package version. Keep tag and binary validation enabled in the tests.
+        (self.root / "Cargo.toml").write_text('[package]\nversion = "0.1.0"\n')
+        for name in ("LICENSE", "README.md"):
+            shutil.copyfile(ROOT / name, self.root / name)
+        project = mock.patch.object(release, "ROOT", self.root)
+        project.start()
+        self.addCleanup(project.stop)
         self.assets = self.root / "assets"
         self.tools = self.root / "tools"
         self.tools.mkdir()
@@ -109,7 +117,20 @@ class ReleaseTests(unittest.TestCase):
     def test_tag_and_binary_version_must_match(self):
         with self.assertRaises(ValueError): release.version("v9.9.9")
         self.binary.write_text("#!/bin/sh\necho 'jammygit 9.9.9'\n")
-        with self.assertRaises(ValueError): release.package("v0.1.0", release.TARGETS[0], self.binary, self.assets)
+        with self.assertRaisesRegex(ValueError, "Binary version does not match"):
+            release.package("v0.1.0", release.TARGETS[0], self.binary, self.assets)
+
+    def test_version_bumps_use_the_fixture_manifest_and_binary(self):
+        for current in ("0.1.2", "1.2.3", "2.0.0-rc.1+build-7"):
+            with self.subTest(version=current):
+                (self.root / "Cargo.toml").write_text(f'[package]\nversion = "{current}"\n')
+                self.binary.write_text(f"#!/bin/sh\necho 'jammygit {current}'\n")
+                self.assertEqual(release.version(f"v{current}"), current)
+                with self.assertRaisesRegex(ValueError, "Release tag must be"):
+                    release.version("v0.1.0")
+                archive = release.package(f"v{current}", release.TARGETS[0], self.binary, self.assets)
+                with tarfile.open(archive) as bundle:
+                    self.assertEqual(bundle.extractfile("jammygit").read(), self.binary.read_bytes())
 
     def test_prerelease_detection_ignores_hyphens_in_build_metadata(self):
         manifest = self.root / "manifest"
@@ -132,7 +153,7 @@ class ReleaseTests(unittest.TestCase):
         scripts = self.root / "scripts"
         scripts.mkdir(exist_ok=True)
         helper = scripts / "release.py"
-        if not helper.exists(): helper.symlink_to(ROOT / "scripts/release.py")
+        if not helper.exists(): shutil.copyfile(ROOT / "scripts/release.py", helper)
         dist = self.root / "dist"
         if not dist.exists(): dist.symlink_to(self.assets, target_is_directory=True)
         return subprocess.run(
