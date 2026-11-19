@@ -149,4 +149,4 @@ The release workflow runs CI first, then builds and exercises four native releas
 
 Only the publish job has write access, using the built-in `GITHUB_TOKEN`; no release token secret is needed. Archives are reproducible for the same binary and source files. All assets are uploaded to a draft before it is published, so incomplete uploads stay unpublished. Reruns can repair a draft but will not overwrite a published release. Prerelease versions such as `0.2.0-rc.1` are marked as prereleases and do not replace the latest stable release.
 
-For subsequent versions, update the package version in `Cargo.toml` and `Cargo.lock`, commit the changes, then push the matching `v…` tag. A mismatched tag fails before packaging.
+For subsequent versions, update the package version in `Cargo.toml`, then run `cargo check --offline` to synchronize `Cargo.lock` without upgrading dependencies. Commit both files before pushing the matching `v…` tag. CI and release builds use `--locked`, so an outdated lockfile stops the release. A mismatched tag fails before packaging.
