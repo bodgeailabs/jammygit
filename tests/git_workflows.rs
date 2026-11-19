@@ -26,6 +26,68 @@ fn git(path: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().into()
 }
 
+#[test]
+fn toggle_all_staging_preserves_edits_renames_deletions_and_untracked_files() {
+    let f = Fixture::new();
+    f.initial();
+    f.write("deleted.txt", "delete this\n");
+    f.write("partial.txt", "original\n");
+    f.repo
+        .execute_staging(&f.repo.plan(Action::StageAll).unwrap())
+        .unwrap();
+    f.commit("feat: tracked files");
+    fs::rename(f.root.join("file.txt"), f.root.join("renamed [file].txt")).unwrap();
+    fs::remove_file(f.root.join("deleted.txt")).unwrap();
+    f.write("partial.txt", "staged version\n");
+    f.repo
+        .execute_staging(&f.repo.plan(Action::StageAll).unwrap())
+        .unwrap();
+    f.write("partial.txt", "latest edits\n");
+    f.write("new [file]*.txt", "untracked\n");
+    f.repo.toggle_all_staging().unwrap();
+    let state = f.repo.snapshot().unwrap();
+    assert!(
+        state
+            .entries
+            .iter()
+            .all(|entry| entry.staged() && !entry.unstaged())
+    );
+    assert_eq!(git(&f.root, &["show", ":partial.txt"]), "latest edits");
+    f.repo.toggle_all_staging().unwrap();
+    assert!(
+        f.repo
+            .snapshot()
+            .unwrap()
+            .entries
+            .iter()
+            .all(|entry| !entry.staged())
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("partial.txt")).unwrap(),
+        "latest edits\n"
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("renamed [file].txt")).unwrap(),
+        "initial\n"
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("new [file]*.txt")).unwrap(),
+        "untracked\n"
+    );
+    assert!(!f.root.join("deleted.txt").exists());
+    assert!(!f.root.join("file.txt").exists());
+}
+
+#[test]
+fn toggle_all_staging_is_a_noop_in_clean_repositories() {
+    let f = Fixture::new();
+    f.repo.toggle_all_staging().unwrap();
+    assert!(f.repo.snapshot().unwrap().entries.is_empty());
+    f.initial();
+    f.repo.toggle_all_staging().unwrap();
+    assert!(f.repo.snapshot().unwrap().entries.is_empty());
+}
+
 fn configure(root: &Path) {
     for (key, value) in [
         ("user.name", "Jammy Test"),

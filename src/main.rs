@@ -9,16 +9,20 @@ use std::{
 
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
     },
     execute,
 };
 use jammygit::background::{Background, DiffKey, DiffRequest, Reply, View, Work};
 use jammygit::git::{Action, Plan, Repo, Snapshot, safe_text};
 use jammygit::network::{Event as NetworkEvent, Job};
-use ratatui::widgets::ListState;
+use ratatui::{
+    layout::{Position, Rect},
+    widgets::ListState,
+};
 
+mod history;
 mod ui;
 
 #[derive(Default)]
@@ -136,6 +140,10 @@ struct App {
     staging_pending: bool,
     review_id: u64,
     review_pending: bool,
+    transcript: history::Transcript,
+    active_turn: Option<u64>,
+    history_area: Rect,
+    diff_area: Rect,
 }
 
 impl App {
@@ -180,6 +188,10 @@ impl App {
             staging_pending: false,
             review_id: 0,
             review_pending: false,
+            transcript: history::Transcript::default(),
+            active_turn: None,
+            history_area: Rect::default(),
+            diff_area: Rect::default(),
         };
         app.refresh();
         app
@@ -222,7 +234,7 @@ impl App {
     }
 
     fn update_diff(&mut self) {
-        if !self.drawer_open || self.show_output {
+        if !self.drawer_open {
             return;
         }
         let entry = if self.all_diff {
@@ -280,6 +292,7 @@ impl App {
         self.refresh_pending = false;
         if let Err(error) = self.background.send(work) {
             self.pending_actions -= 1;
+            self.finish_turn(false, vec![safe_text(&error)]);
             self.error(error);
         }
     }
@@ -312,7 +325,7 @@ impl App {
             }
         }
         while let Some((id, result)) = self.background.diff.poll() {
-            if id != self.diff_id || !self.drawer_open || self.show_output {
+            if id != self.diff_id || !self.drawer_open {
                 continue;
             }
             let text = result.unwrap_or_else(|error| error);
@@ -333,7 +346,7 @@ impl App {
             .is_some_and(|(due, _)| Instant::now() >= *due)
         {
             let (_, key) = self.diff_due.take().unwrap();
-            if self.drawer_open && !self.show_output {
+            if self.drawer_open {
                 self.background.diff.request(DiffRequest {
                     id: self.diff_id,
                     key,
@@ -382,7 +395,10 @@ impl App {
                     self.pending_actions = self.pending_actions.saturating_sub(1);
                     match result {
                         Ok((plan, job)) => self.install_network(plan, job),
-                        Err(error) => self.error(error),
+                        Err(error) => {
+                            self.finish_turn(false, vec![safe_text(&error)]);
+                            self.error(error);
+                        }
                     }
                 }
             }
@@ -427,6 +443,7 @@ impl App {
                         } else {
                             self.notice = "Preparing commit…".into();
                             self.job_is_commit = true;
+                            self.begin_turn(&Action::Commit(self.editor.text.clone()));
                             self.submit(Work::Commit {
                                 id: self.review_id,
                                 message: self.editor.text.clone(),
@@ -458,7 +475,6 @@ impl App {
             KeyCode::Char('?') => self.modal = Some(Modal::Help),
             KeyCode::Char('g') => self.modal = Some(Modal::History),
             KeyCode::Enter | KeyCode::Right => {
-                self.show_output = false;
                 self.set_drawer(true);
                 self.select_diff_view();
             }
@@ -473,27 +489,33 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Tab => {
-                self.show_output = false;
                 self.staged = !self.staged;
                 self.scroll = 0;
                 self.set_drawer(true);
                 self.update_diff();
             }
             KeyCode::Char('v') => {
-                self.show_output = false;
                 self.all_diff = !self.all_diff;
                 self.scroll = 0;
                 self.set_drawer(true);
                 self.update_diff();
             }
             KeyCode::Char('o') => {
-                self.show_output = self.network_output.is_some() && !self.show_output;
+                self.show_output = !self.transcript.turns.is_empty() && !self.show_output;
                 if self.show_output {
                     self.set_drawer(false);
                 }
             }
             KeyCode::PageDown | KeyCode::Char('J') => self.scroll_output(false),
             KeyCode::PageUp | KeyCode::Char('K') => self.scroll_output(true),
+            KeyCode::Home if !self.drawer_open => {
+                self.show_output = !self.transcript.turns.is_empty();
+                self.transcript.oldest();
+            }
+            KeyCode::End if !self.drawer_open => {
+                self.show_output = !self.transcript.turns.is_empty();
+                self.transcript.follow_latest();
+            }
             KeyCode::Char(' ') | KeyCode::Char('u') => {
                 if let Some(entry) = self
                     .state
@@ -520,7 +542,6 @@ impl App {
                         "Nothing staged. Space stages the selected file; a stages all.".into(),
                     );
                 } else {
-                    self.show_output = false;
                     self.staged = true;
                     self.all_diff = true;
                     self.set_drawer(false);
@@ -534,24 +555,21 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char('P') | KeyCode::Char('p') | KeyCode::Char('a') => {
-                let action = match key.code {
-                    KeyCode::Char('P') => Action::Push,
-                    KeyCode::Char('p') => Action::Pull,
-                    _ => Action::StageAll,
+            KeyCode::Char('a') => {
+                self.notice = "Updating staging…".into();
+                self.staging_pending = true;
+                self.submit(Work::ToggleAllStaging);
+            }
+            KeyCode::Char('P') | KeyCode::Char('p') => {
+                let action = if key.code == KeyCode::Char('P') {
+                    Action::Push
+                } else {
+                    Action::Pull
                 };
-                self.notice = if action == Action::StageAll {
-                    "Reading staging state…"
-                } else {
-                    "Preparing Git operation…"
-                }
-                .into();
+                self.notice = "Preparing Git operation…".into();
                 self.job_is_commit = false;
-                self.submit(if action == Action::StageAll {
-                    Work::Confirm(action)
-                } else {
-                    Work::StartAction(action)
-                });
+                self.begin_turn(&action);
+                self.submit(Work::StartAction(action));
             }
             _ => {}
         }
@@ -559,10 +577,48 @@ impl App {
     }
 
     fn start_network(&mut self, plan: Plan) {
+        if self.active_turn.is_none() {
+            self.begin_turn(&plan.action);
+        }
         self.submit(Work::StartPlan(plan));
     }
 
+    fn begin_turn(&mut self, action: &Action) {
+        let (title, request) = match action {
+            Action::Commit(message) => ("Commit staged changes", message.clone()),
+            Action::Push => ("Push branch", "Push the current branch.".into()),
+            Action::Pull => (
+                "Pull updates",
+                "Pull updates for the current branch.".into(),
+            ),
+            _ => return,
+        };
+        self.active_turn = Some(
+            self.transcript.begin(
+                title.into(),
+                request
+                    .lines()
+                    .map(safe_text)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+        );
+        self.show_output = true;
+    }
+
+    fn finish_turn(&mut self, success: bool, output: Vec<String>) {
+        if let Some(id) = self.active_turn.take() {
+            self.transcript.finish(id, success, output);
+        }
+    }
+
     fn install_network(&mut self, plan: Plan, job: Job) {
+        if self.active_turn.is_none() {
+            self.begin_turn(&plan.action);
+        }
+        if let Some(id) = self.active_turn {
+            self.transcript.running(id, plan.title.clone());
+        }
         let (rows, cols) = self.output_size;
         let mut parser = vt100::Parser::new(nonzero(rows), nonzero(cols), 1000);
         let detail = plan
@@ -572,19 +628,6 @@ impl App {
             .collect::<Vec<_>>()
             .join("\r\n");
         parser.process(format!("{detail}\r\n\r\n").as_bytes());
-        if let Action::Commit(message) = &plan.action {
-            parser.process(
-                format!(
-                    "{}\r\n\r\n",
-                    message
-                        .lines()
-                        .map(safe_text)
-                        .collect::<Vec<_>>()
-                        .join("\r\n")
-                )
-                .as_bytes(),
-            );
-        }
         self.network_output = Some(parser);
         self.job_is_commit = matches!(plan.action, Action::Commit(_));
         self.network_title = plan.title;
@@ -626,13 +669,25 @@ impl App {
                         parser.screen_mut().set_scrollback(0);
                         parser.process(format!("\r\n{}\r\n", safe_text(&message)).as_bytes());
                     }
+                    let output = if let Some(parser) = &mut self.network_output {
+                        let height = history::terminal_height(parser);
+                        let mut lines = history::terminal_rows(parser, 0, height);
+                        while lines.last().is_some_and(|line| line.trim().is_empty()) {
+                            lines.pop();
+                        }
+                        lines
+                    } else {
+                        vec![message.clone()]
+                    };
+                    self.finish_turn(result.is_ok(), output);
+                    self.network_output = None;
                     self.network = None;
                     self.network_input = false;
                     self.failed = result.is_err();
                     self.notice = if self.job_is_commit && result.is_err() {
                         format!("{message} Draft saved; c to retry · o output")
                     } else {
-                        format!("{message}  o hides activity · Enter opens diff")
+                        format!("{message}  PgUp scrolls history · End returns to latest")
                     };
                     if self.job_is_commit && result.is_ok() {
                         self.editor = Editor::default();
@@ -662,12 +717,14 @@ impl App {
         }
         if self.network_input {
             if let Some(bytes) = terminal_key(key) {
+                self.transcript.follow_latest();
                 self.send_network(&bytes);
             }
         } else {
             match key.code {
                 KeyCode::Char('i') => {
                     self.network_input = true;
+                    self.transcript.follow_latest();
                     if let Some(parser) = &mut self.network_output {
                         parser.screen_mut().set_scrollback(0);
                     }
@@ -677,6 +734,8 @@ impl App {
                 }
                 KeyCode::PageUp | KeyCode::Char('K') => self.scroll_output(true),
                 KeyCode::PageDown | KeyCode::Char('J') => self.scroll_output(false),
+                KeyCode::Home => self.transcript.oldest(),
+                KeyCode::End => self.transcript.follow_latest(),
                 _ => {}
             }
         }
@@ -692,22 +751,47 @@ impl App {
     }
 
     fn scroll_output(&mut self, up: bool) {
-        if self.show_output {
-            if let Some(parser) = &mut self.network_output {
-                let current = parser.screen().scrollback();
-                parser.screen_mut().set_scrollback(if up {
-                    current.saturating_add(10)
-                } else {
-                    current.saturating_sub(10)
-                });
-            }
-        } else {
+        if self.drawer_open {
             self.scroll = if up {
                 self.scroll.saturating_sub(10)
             } else {
                 self.scroll.saturating_add(10)
             };
+        } else {
+            self.show_output = !self.transcript.turns.is_empty();
+            self.transcript.scroll(up, 10);
         }
+    }
+
+    fn mouse(&mut self, event: MouseEvent) -> bool {
+        if self.modal.is_some() {
+            return false;
+        }
+        let up = match event.kind {
+            MouseEventKind::ScrollUp => true,
+            MouseEventKind::ScrollDown => false,
+            _ => return false,
+        };
+        if self.drawer_open
+            && self
+                .diff_area
+                .contains(Position::new(event.column, event.row))
+        {
+            self.scroll = if up {
+                self.scroll.saturating_sub(3)
+            } else {
+                self.scroll.saturating_add(3)
+            };
+        } else if self
+            .history_area
+            .contains(Position::new(event.column, event.row))
+        {
+            self.show_output = !self.transcript.turns.is_empty();
+            self.transcript.scroll(up, 3);
+        } else {
+            return false;
+        }
+        true
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -794,7 +878,7 @@ fn terminal_key(key: KeyEvent) -> Option<Vec<u8>> {
 struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), DisableBracketedPaste);
+        let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
         ratatui::restore();
     }
 }
@@ -832,7 +916,7 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new(repo);
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;
-    execute!(io::stdout(), EnableBracketedPaste)?;
+    execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
     let mut dirty = true;
     'running: loop {
         dirty |= app.poll_background();
@@ -884,6 +968,7 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
                         dirty = true;
                     }
                     Event::Resize(_, _) => dirty = true,
+                    Event::Mouse(mouse) => dirty |= app.mouse(mouse),
                     _ => {}
                 }
                 if !event::poll(Duration::ZERO)? {
@@ -949,6 +1034,22 @@ mod tests {
             samples.push(started.elapsed().as_secs_f64() * 1000.0);
         }
         println!("render_5000_files_p95_ms={:.3}", percentile(samples));
+        for index in 0..100 {
+            app.begin_turn(&Action::Commit(format!("feat: action {index}")));
+            app.finish_turn(
+                true,
+                (0..80).map(|line| format!("Output line {line}")).collect(),
+            );
+        }
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let mut samples = Vec::new();
+        for _ in 0..20 {
+            let started = Instant::now();
+            app.scroll_output(true);
+            terminal.draw(|f| app.draw(f)).unwrap();
+            samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        println!("render_100_actions_p95_ms={:.3}", percentile(samples));
         let started = Instant::now();
         app.repo.snapshot().unwrap();
         println!(
@@ -1173,6 +1274,22 @@ mod tests {
             settle(&mut app);
             assert!(!matches!(app.modal, Some(Modal::Confirm(_))));
         }
+        assert_eq!(app.transcript.turns.len(), 2);
+        assert!(
+            app.transcript
+                .turns
+                .iter()
+                .all(|turn| turn.status == history::Status::Succeeded)
+        );
+        assert!(
+            app.transcript
+                .turns
+                .front()
+                .unwrap()
+                .output
+                .iter()
+                .any(|line| line.contains("succeeded"))
+        );
     }
 
     #[test]
@@ -1254,6 +1371,63 @@ mod tests {
                 if rejected { "feat: retained draft" } else { "" }
             );
             assert!(app.modal.is_none());
+            let turn = app.transcript.turns.back().unwrap();
+            assert_eq!(turn.request, "feat: retained draft");
+            assert_eq!(
+                turn.status,
+                if rejected {
+                    history::Status::Failed
+                } else {
+                    history::Status::Succeeded
+                }
+            );
+            if rejected {
+                assert!(turn.output.iter().any(|line| line.contains("REJECTED")));
+                assert_eq!(app.transcript.turns.len(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn a_toggles_all_files_immediately_using_current_git_state() {
+        let (dir, mut app) = test_app();
+        // The displayed snapshot is intentionally older than these files.
+        for name in ["first", "second"] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+        }
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(app.modal.is_none());
+        assert_eq!(app.pending_actions, 1);
+        // Repeated input while staging must not queue a second toggle.
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(app.pending_actions, 1);
+        settle(&mut app);
+        assert!(!app.failed);
+        assert!(
+            app.state
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .all(|entry| entry.staged() && !entry.unstaged())
+        );
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(app.modal.is_none());
+        settle(&mut app);
+        assert!(!app.failed);
+        assert!(
+            app.state
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .all(|entry| !entry.staged())
+        );
+        for name in ["first", "second"] {
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join(name)).unwrap(),
+                name
+            );
         }
     }
 
@@ -1262,7 +1436,7 @@ mod tests {
         let (dir, mut app) = test_app();
         std::fs::write(dir.path().join("first"), "first").unwrap();
         app.refresh();
-        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        app.submit(Work::Confirm(Action::StageAll));
         settle(&mut app);
         std::fs::write(dir.path().join("surprise"), "new file after review").unwrap();
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -1301,6 +1475,65 @@ mod tests {
         assert!(matches!(app.modal, Some(Modal::Error(_))));
         assert_eq!(app.editor.text, "feat: saved draft");
         assert!(app.repo.snapshot().unwrap().head.is_none());
+        assert_eq!(
+            app.transcript.turns.back().unwrap().status,
+            history::Status::Failed
+        );
+        assert!(app.active_turn.is_none());
+    }
+
+    #[test]
+    fn session_timeline_scrolls_retains_history_and_renders_at_all_sizes() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (_dir, mut app) = test_app();
+        for index in 0..3 {
+            app.begin_turn(&Action::Commit(format!("feat: request {index}")));
+            app.finish_turn(
+                true,
+                (0..20)
+                    .map(|line| format!("Action {index} output {line}"))
+                    .collect(),
+            );
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 38)).unwrap();
+        let text = |terminal: &Terminal<TestBackend>| {
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(text(&terminal).contains("Action 2 output 19"));
+        app.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(text(&terminal).contains("feat: request 0"));
+        assert!(!app.transcript.following());
+        app.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(text(&terminal).contains("Action 2 output 19"));
+        app.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert!(!app.show_output);
+        app.key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(app.show_output);
+        assert_eq!(app.transcript.turns.len(), 3);
+        for (width, height) in [(64, 18), (80, 24), (120, 38)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            app.network_output = Some(vt100::Parser::new(nonzero(3), nonzero(30), 1000));
+            app.begin_turn(&Action::Push);
+            app.network_output
+                .as_mut()
+                .unwrap()
+                .process(b"interactive prompt: ");
+            app.network_input = true;
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            app.finish_turn(false, vec!["Stopped".into()]);
+            app.network_output = None;
+            app.network_input = false;
+        }
     }
 
     #[test]

@@ -110,8 +110,6 @@ def main():
         try:
             wait_for(b"jammygit")
             send(b"a")
-            wait_for(b"Stage all changes")
-            send(b"\r")
             wait_for_staging()
             send(b"c")
             wait_for(b"Commit staged changes")
@@ -120,7 +118,7 @@ def main():
             send(b"\r")
             wait_for(b"HOOK_CONFIRM:", stay_in_app=True)
             send(b"iyes\r")
-            wait_for(b"succeeded.", stay_in_app=True)
+            wait_for(b"Commit staged changes succeeded.", stay_in_app=True)
             assert git(work, "log", "-1", "--format=%B") == "feat: PTY commit\n\nBody from pasted text."
             push_hook = hooks / "pre-push"
             push_hook.write_text('#!/bin/sh\nprintf "PUSH_INPUT: " > /dev/tty\nread answer < /dev/tty\n[ "$answer" = yes ]\n')
@@ -129,7 +127,7 @@ def main():
             # One key starts pushing; the hook prompt appears inside the app.
             wait_for(b"PUSH_INPUT:", stay_in_app=True)
             send(b"iyes\r")
-            wait_for(b"succeeded.", stay_in_app=True)
+            wait_for(b"Push branch succeeded.", stay_in_app=True)
             assert git(remote, "rev-parse", "main") == git(work, "rev-parse", "HEAD")
 
             git(root, "clone", str(remote), str(peer))
@@ -139,9 +137,14 @@ def main():
             git(peer, "push")
             (work / "local-notes.txt").write_text("untracked work stays here\n")
             send(b"p")
-            wait_for(b"succeeded.", stay_in_app=True)
+            wait_for(b"Pull fast-forward succeeded.", stay_in_app=True)
             assert (work / "hello.txt").read_text() == "pulled through the TUI\n"
             assert (work / "local-notes.txt").read_text() == "untracked work stays here\n"
+            # Earlier commits remain available after later pushes and pulls.
+            send(b"\x1b[H")
+            wait_for(b"feat: PTY commit", stay_in_app=True)
+            send(b"\x1b[F")
+            wait_for(b"PgUp scrolls back", stay_in_app=True)
             send(b"q")
             wait_for(b"PTY_TERMINAL_RESTORED")
             deadline = time.monotonic() + 10
@@ -156,12 +159,14 @@ def main():
                     os.read(fd, 65536)
             assert finished, "TUI did not exit"
         finally:
+            # Close our slave before reaping the controlling session leader;
+            # macOS terminal revocation can otherwise stall failed-test cleanup.
+            os.close(fd)
+            os.close(slave_fd)
             if not finished:
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
-            os.close(fd)
-            os.close(slave_fd)
-    print("PTY smoke test passed: in-app commit/push/pull, embedded hook input, terminal restoration.")
+    print("PTY smoke test passed: in-app commit/push/pull, embedded hook input, session history, terminal restoration.")
 
 
 if __name__ == "__main__":

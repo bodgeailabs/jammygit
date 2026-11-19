@@ -217,6 +217,7 @@ pub enum Action {
     Stage(Entry),
     Unstage(Entry),
     StageAll,
+    UnstageAll,
     Commit(String),
     Push,
     Pull,
@@ -469,7 +470,7 @@ impl Repo {
         if let Some(operation) = &state.operation
             && !matches!(
                 action,
-                Action::Stage(_) | Action::Unstage(_) | Action::StageAll
+                Action::Stage(_) | Action::Unstage(_) | Action::StageAll | Action::UnstageAll
             )
         {
             return Err(format!(
@@ -517,6 +518,25 @@ impl Repo {
                 (
                     "Stage all changes".into(),
                     "All tracked changes and untracked files will be staged.".into(),
+                )
+            }
+            Action::UnstageAll => {
+                if state.head.is_some() {
+                    args.extend(strings(&["restore", "--staged", "--", "."]));
+                } else {
+                    args.extend(strings(&[
+                        "rm",
+                        "--cached",
+                        "-r",
+                        "-f",
+                        "--ignore-unmatch",
+                        "--",
+                        ".",
+                    ]));
+                }
+                (
+                    "Unstage all changes".into(),
+                    "All staged changes will be unstaged. Working files are preserved.".into(),
                 )
             }
             Action::Commit(message) => {
@@ -671,10 +691,23 @@ impl Repo {
         }
     }
 
+    pub fn toggle_all_staging(&self) -> Result<()> {
+        let state = self.snapshot()?;
+        if state.entries.is_empty() {
+            return Ok(());
+        }
+        let action = if state.entries.iter().any(Entry::unstaged) {
+            Action::StageAll
+        } else {
+            Action::UnstageAll
+        };
+        self.execute_staging(&self.plan(action)?)
+    }
+
     pub fn execute_staging(&self, plan: &Plan) -> Result<()> {
         if !matches!(
             plan.action,
-            Action::Stage(_) | Action::Unstage(_) | Action::StageAll
+            Action::Stage(_) | Action::Unstage(_) | Action::StageAll | Action::UnstageAll
         ) {
             return Err("This operation needs the interactive terminal.".into());
         }

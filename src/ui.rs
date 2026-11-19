@@ -1,4 +1,4 @@
-use crate::{App, Modal, nonzero};
+use crate::{App, Modal, history, nonzero};
 use jammygit::git::{Entry, safe_text};
 use ratatui::{
     Frame,
@@ -24,6 +24,8 @@ const RED: Color = Color::Rgb(239, 159, 163);
 impl App {
     pub(super) fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        self.history_area = Rect::default();
+        self.diff_area = Rect::default();
         frame.render_widget(Block::new().style(Style::default().fg(TEXT).bg(BG)), area);
         if area.width < 64 || area.height < 18 {
             frame.render_widget(
@@ -63,31 +65,29 @@ impl App {
             self.draw_conversation(frame, centered(lane, 88));
         }
         if drawer_width > 1 {
-            self.draw_diff(
-                frame,
-                Rect::new(
-                    rows[1].right() - drawer_width,
-                    rows[1].y,
-                    drawer_width,
-                    rows[1].height,
-                ),
+            self.diff_area = Rect::new(
+                rows[1].right() - drawer_width,
+                rows[1].y,
+                drawer_width,
+                rows[1].height,
             );
+            self.draw_diff(frame, self.diff_area);
         }
         self.draw_composer(frame, centered(rows[2], 88));
         frame.render_widget(
             Paragraph::new(safe_text(&self.notice))
                 .style(Style::default().fg(if self.failed { RED } else { DIM }))
                 .wrap(Wrap { trim: false }),
-            centered(rows[3], 104),
+            centered(rows[3], 88),
         );
         let keys = if self.network.is_some() {
             "i input   Esc leave input   Ctrl+C interrupt Git   J/K scroll"
         } else if editing {
             "Enter commit   Esc cancel   Ctrl+J newline   Ctrl+U clear"
         } else if area.width < 90 {
-            "↑↓ select  Enter diff  Space stage  c commit  P push  p pull"
+            "↑↓ select  Enter diff  Space stage  a all  c commit  ? help"
         } else {
-            "↑↓ select   Enter diff   Space stage   c commit   P push   p pull   ? help"
+            "↑↓ select   Enter diff   Space stage   a all   c commit   P push   p pull   ? help"
         };
         frame.render_widget(
             Paragraph::new(keys)
@@ -144,13 +144,13 @@ impl App {
     fn draw_conversation(&mut self, frame: &mut Frame, area: Rect) {
         let count = self.state.as_ref().map_or(0, |s| s.entries.len());
         let desired = (count as u16).saturating_mul(2).saturating_add(2).max(8);
-        let (files, activity) = if self.show_output {
+        let (files, activity) = if self.show_output && !self.transcript.turns.is_empty() {
             let parts = Layout::vertical([
-                Constraint::Length(desired.min(8).min(area.height / 3)),
                 Constraint::Min(3),
+                Constraint::Length(desired.min(8).min((area.height / 3).max(5))),
             ])
             .split(area);
-            (parts[0], Some(parts[1]))
+            (parts[1], Some(parts[0]))
         } else {
             let height = desired.min(area.height);
             let offset = area.height.saturating_sub(height) / 2;
@@ -158,7 +158,7 @@ impl App {
         };
         self.draw_files(frame, files);
         if let Some(activity) = activity {
-            self.draw_activity(frame, activity);
+            self.draw_transcript(frame, activity);
         }
     }
 
@@ -229,21 +229,15 @@ impl App {
         );
     }
 
-    fn draw_activity(&mut self, frame: &mut Frame, area: Rect) {
-        let label = if self.network.is_some() {
-            if self.network_input {
-                "input · Esc to leave"
-            } else {
-                "running · i for input"
-            }
-        } else {
-            "finished · o to hide"
-        };
-        let title = format!(" {} · {label} ", self.network_title);
-        let block = card(&title);
-        let body = block.inner(area);
-        frame.render_widget(block, area);
-        let size = (body.height.max(1), body.width.max(1));
+    fn draw_transcript(&mut self, frame: &mut Frame, area: Rect) {
+        let body = Rect::new(
+            area.x + 1,
+            area.y + 1,
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        self.history_area = area;
+        let size = (body.height.saturating_sub(4).max(1), body.width.max(1));
         if size != self.output_size {
             self.output_size = size;
             if let Some(parser) = &mut self.network_output {
@@ -256,22 +250,134 @@ impl App {
                 self.failed = true;
             }
         }
-        if let Some(parser) = &self.network_output {
-            frame.render_widget(
-                Paragraph::new(parser.screen().contents()).style(Style::default().fg(TEXT)),
-                body,
-            );
-            if self.network_input
-                && !parser.screen().hide_cursor()
-                && body.width > 0
-                && body.height > 0
+        let live_height = self
+            .network_output
+            .as_mut()
+            .map_or(0, history::terminal_height);
+        for turn in &mut self.transcript.turns {
+            turn.prepare(body.width);
+        }
+        let total = self
+            .transcript
+            .turns
+            .iter()
+            .map(|turn| {
+                turn.rows.len()
+                    + if Some(turn.id) == self.active_turn {
+                        live_height
+                    } else {
+                        0
+                    }
+                    + 2
+            })
+            .sum::<usize>()
+            .saturating_sub(2);
+        let top = self.transcript.viewport(total, body.height);
+        let hint = if self.transcript.following() {
+            "Session activity · PgUp scrolls back"
+        } else {
+            "Earlier activity · End returns to latest"
+        };
+        let hint = if self.transcript.trimmed {
+            format!("{hint} · oldest entries cleared")
+        } else {
+            hint.into()
+        };
+        frame.render_widget(
+            Paragraph::new(hint).style(Style::default().fg(DIM)),
+            Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1),
+        );
+        let padding = usize::from(body.height).saturating_sub(total);
+        let end = top + usize::from(body.height);
+        let mut start = 0;
+        for turn in &self.transcript.turns {
+            for (index, row) in turn
+                .rows
+                .iter()
+                .enumerate()
+                .skip(top.saturating_sub(start))
+                .take(end.saturating_sub(start.max(top)))
             {
-                let (row, col) = parser.screen().cursor_position();
-                frame.set_cursor_position((
-                    body.x + col.min(body.width - 1),
-                    body.y + row.min(body.height - 1),
-                ));
+                let position = start + index;
+                if position >= end {
+                    break;
+                }
+                let mut rect = Rect::new(
+                    body.x,
+                    body.y + (padding + position - top) as u16,
+                    body.width,
+                    1,
+                );
+                if matches!(row.kind, history::Kind::Request) {
+                    let width = (Line::from(row.text.as_str()).width() as u16)
+                        .saturating_add(2)
+                        .min(body.width);
+                    rect.x += body.width - width;
+                    rect.width = width;
+                }
+                let style = match row.kind {
+                    history::Kind::RequestLabel => Style::default().fg(ACCENT).bold(),
+                    history::Kind::Request => Style::default().fg(TEXT).bg(SELECTED),
+                    history::Kind::Response(status) => Style::default()
+                        .fg(match status {
+                            history::Status::Succeeded => GREEN,
+                            history::Status::Failed => RED,
+                            _ => ACCENT,
+                        })
+                        .bold(),
+                    _ => Style::default().fg(DIM),
+                };
+                let paragraph = Paragraph::new(row.text.as_str()).style(style);
+                frame.render_widget(
+                    if matches!(
+                        row.kind,
+                        history::Kind::RequestLabel | history::Kind::Request
+                    ) {
+                        paragraph.right_aligned()
+                    } else {
+                        paragraph
+                    },
+                    rect,
+                );
             }
+            start += turn.rows.len();
+            if Some(turn.id) == self.active_turn {
+                if let Some(parser) = &mut self.network_output {
+                    let skip = top.saturating_sub(start).min(live_height);
+                    let count = live_height
+                        .saturating_sub(skip)
+                        .min(end.saturating_sub(start + skip));
+                    for (index, text) in history::terminal_rows(parser, skip, count)
+                        .iter()
+                        .enumerate()
+                    {
+                        frame.render_widget(
+                            Paragraph::new(text.as_str()).style(Style::default().fg(TEXT)),
+                            Rect::new(
+                                body.x,
+                                body.y + (padding + start + skip + index - top) as u16,
+                                body.width,
+                                1,
+                            ),
+                        );
+                    }
+                    let (row, col) = parser.screen().cursor_position();
+                    let cursor = start + parser.screen().scrollback_len() + usize::from(row);
+                    if self.network_input
+                        && !parser.screen().hide_cursor()
+                        && cursor >= top
+                        && cursor < end
+                        && body.width > 0
+                    {
+                        frame.set_cursor_position((
+                            body.x + col.min(body.width - 1),
+                            body.y + (padding + cursor - top) as u16,
+                        ));
+                    }
+                }
+                start += live_height;
+            }
+            start += 2;
         }
     }
 
@@ -383,7 +489,7 @@ impl App {
         if matches!(modal, Modal::Commit) {
             return;
         }
-        let height = if matches!(modal, Modal::Help) { 25 } else { 14 };
+        let height = if matches!(modal, Modal::Help) { 27 } else { 14 };
         let width = frame.area().width.saturating_sub(4).min(84);
         let height = height.min(frame.area().height.saturating_sub(2));
         let area = Rect::new(
@@ -393,7 +499,7 @@ impl App {
             height,
         );
         let (title, text) = match modal {
-            Modal::Help => (" Keys & behavior ", "↑ / ↓ or j / k   Select a file\nEnter / →        Slide in the selected diff\nEsc / ←          Close the diff drawer\nSpace / u        Stage / unstage the selected file\na                Stage all (with confirmation)\nTab              Switch working / staged diff\nv                Switch selected file / all files\nJ / K            Scroll diff or Git output\nh / l            Pan the diff horizontally\nc                Write a commit in the composer\nP / p            Push / pull immediately\no                Show / hide Git activity\ng                Recent commits\nr                Refresh\nq / Ctrl+C       Quit when Git is idle\n\nComposer: Enter commits; Ctrl+J adds a newline; Esc cancels.\nCommits, pushes, and pulls run inside the app.\nWhile Git runs: i types into its terminal; Esc leaves input.\nCtrl+C interrupts Git without leaving the app.\n\nPress any key to close.".into()),
+            Modal::Help => (" Keys & behavior ", "↑ / ↓ or j / k   Select a file\nEnter / →        Slide in the selected diff\nEsc / ←          Close the diff drawer\nSpace / u        Stage / unstage the selected file\na                Stage / unstage all files\nTab              Switch working / staged diff\nv                Switch selected file / all files\nJ / K, PgUp/Dn   Scroll activity or open diff\nHome / End       Oldest activity / follow latest\nMouse wheel      Scroll activity or diff\nh / l            Pan the diff horizontally\nc                Write a commit in the composer\nP / p            Push / pull immediately\no                Show / hide Git activity\ng                Recent commits\nr                Refresh\nq / Ctrl+C       Quit when Git is idle\n\nComposer: Enter commits; Ctrl+J adds a newline; Esc cancels.\nCommits, pushes, and pulls run inside the app.\nWhile Git runs: i types into its terminal; Esc leaves input.\nCtrl+C interrupts Git without leaving the app.\n\nPress any key to close.".into()),
             Modal::History => (" Recent commits ", format!("{}\n\nPress any key to close.", self.log.lines().map(safe_text).collect::<Vec<_>>().join("\n"))),
             Modal::Error(text) => (" Cannot continue ", format!("{}\n\nPress any key to close.", safe_text(text))),
             Modal::Confirm(plan) => (&*plan.title, format!("{}\n\nEnter / y to continue · Esc / n to cancel", plan.detail.lines().map(safe_text).collect::<Vec<_>>().join("\n"))),
@@ -502,6 +608,31 @@ mod preview {
         app.diff = "diff --git a/src/ui.rs b/src/ui.rs\nindex 3e8a5c1..7b3a9f2 100644\n--- a/src/ui.rs\n+++ b/src/ui.rs\n@@ -12,6 +12,10 @@ use ratatui::style::Color;\n \n-const ACCENT: Color = Color::Rgb(97, 213, 191);\n-const BG: Color = Color::Rgb(20, 25, 33);\n+// Initium blue, with a navy workspace and lighter labels.\n+const BLUE: Color = Color::Rgb(35, 78, 145);\n+const ACCENT: Color = Color::Rgb(145, 184, 240);\n+const BG: Color = Color::Rgb(14, 23, 38);\n+const SURFACE: Color = Color::Rgb(20, 33, 53);\n \n fn draw_workspace(frame: &mut Frame) {\n+    draw_review(frame);\n+    draw_file_dock(frame);\n }".into();
         app.log = "1b2a8c4  feat: keep push and pull inside the app\n7d4e2a1  fix: preserve draft after hook failure\n3c8f9b2  feat: stage and review changes".into();
         app.notice = "1 file staged. Review the patch, then press c to commit.".into();
+        let commit = app.transcript.begin(
+            "Commit staged changes".into(),
+            "feat: add Initium blue workspace".into(),
+        );
+        app.transcript.finish(
+            commit,
+            true,
+            vec![
+                "[codex/blue-workspace 1b2a8c4] feat: add Initium blue workspace".into(),
+                " 2 files changed, 38 insertions(+), 12 deletions(-)".into(),
+            ],
+        );
+        let push = app
+            .transcript
+            .begin("Push branch".into(), "Push the current branch.".into());
+        app.transcript.finish(
+            push,
+            true,
+            vec![
+                "Writing objects: 100% (8/8), 2.41 KiB, done.".into(),
+                "1b2a8c4  HEAD → origin/codex/blue-workspace".into(),
+                "Push branch succeeded.".into(),
+            ],
+        );
+        app.show_output = true;
         for (name, width, height) in [
             ("workspace", 120, 38),
             ("compact", 64, 18),
@@ -524,13 +655,20 @@ mod preview {
                 app.editor.cursor = app.editor.text.len();
             }
             if name == "git-output" {
-                let mut parser = vt100::Parser::new(nonzero(24), nonzero(118), 1000);
-                parser.process(b"codex/blue-workspace -> origin/refs/heads/codex/blue-workspace\r\nDestination: git@example.com:initium/jammygit.git\r\n\r\nEnumerating objects: 14, done.\r\nCounting objects: 100% (14/14), done.\r\nWriting objects: 100% (8/8), 2.41 KiB, done.\r\n\r\nPush branch succeeded.\r\n");
-                app.network_output = Some(parser);
-                app.show_output = true;
-                app.network_title = "Push branch".into();
+                let pull = app.transcript.begin(
+                    "Pull updates".into(),
+                    "Pull updates for the current branch.".into(),
+                );
+                app.transcript.finish(
+                    pull,
+                    true,
+                    vec![
+                        "Already up to date.".into(),
+                        "Pull updates succeeded.".into(),
+                    ],
+                );
                 app.notice =
-                    "Push branch succeeded. Tab returns to diff · o shows Git output".into();
+                    "Pull updates succeeded. PgUp scrolls history · End returns to latest".into();
             }
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|f| app.draw(f)).unwrap();

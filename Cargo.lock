@@ -325,6 +325,7 @@ dependencies = [
  "portable-pty",
  "ratatui",
  "tempfile",
+ "unicode-width",
  "vt100",
 ]
 

@@ -125,6 +125,7 @@ pub enum Work {
     Commit { id: u64, message: String },
     Confirm(Action),
     Stage(Action),
+    ToggleAllStaging,
     StagePlan(Plan),
     StartAction(Action),
     StartPlan(Plan),
@@ -186,6 +187,9 @@ impl Background {
                     ),
                     Work::StagePlan(plan) => {
                         Reply::Staged(repo.execute_staging(&plan).and_then(|_| read_view(&repo)))
+                    }
+                    Work::ToggleAllStaging => {
+                        Reply::Staged(repo.toggle_all_staging().and_then(|_| read_view(&repo)))
                     }
                     Work::StartAction(action) => Reply::Started(repo.plan(action).and_then(start)),
                     Work::StartPlan(plan) => Reply::Started(start(plan)),
