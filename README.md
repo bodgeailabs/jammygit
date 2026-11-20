@@ -147,6 +147,8 @@ The release workflow runs CI first, then builds and exercises four native releas
 | Linux ARM64 | `jammygit-aarch64-unknown-linux-musl.tar.gz` |
 | Linux x86-64 | `jammygit-x86_64-unknown-linux-musl.tar.gz` |
 
+CI also builds and exercises the x86-64 Linux musl release before tagging. Linux artifacts must have no ELF interpreter or shared-library dependencies. The x86-64 build uses Rust's default linker with its bundled musl runtime; the `musl-gcc` wrapper is avoided because it can add an incompatible dynamic loader to static PIE binaries.
+
 Only the publish job has write access, using the built-in `GITHUB_TOKEN`; no release token secret is needed. Archives are reproducible for the same binary and source files. All assets are uploaded to a draft before it is published, so incomplete uploads stay unpublished. Reruns can repair a draft but will not overwrite a published release. Prerelease versions such as `0.2.0-rc.1` are marked as prereleases and do not replace the latest stable release.
 
 For subsequent versions, update the package version in `Cargo.toml`, then run `cargo check --offline` to synchronize `Cargo.lock` without upgrading dependencies. Commit both files before pushing the matching `v…` tag. CI and release builds use `--locked`, so an outdated lockfile stops the release. A mismatched tag fails before packaging.

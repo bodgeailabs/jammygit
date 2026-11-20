@@ -22,7 +22,9 @@ jobs:
           python-version: '3.13'
       - name: Check release tooling and installer
         run: |
-          bash -n install.sh scripts/publish-release.sh
+          for script in install.sh scripts/publish-release.sh scripts/check-static.sh; do
+            bash -n "$script"
+          done
           python3 -m unittest discover -s tests -p 'test_release*.py' -v
       - name: Lint Bash scripts
         if: runner.os == 'Linux'
@@ -31,7 +33,7 @@ jobs:
             sudo apt-get update
             sudo apt-get install --yes --no-install-recommends shellcheck
           fi
-          shellcheck install.sh scripts/publish-release.sh
+          shellcheck install.sh scripts/publish-release.sh scripts/check-static.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -40,3 +42,11 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --locked
       - run: python3 scripts/smoke_test.py
+      - name: Exercise Linux static release before tagging
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --locked --release --target x86_64-unknown-linux-musl
+          bash scripts/check-static.sh target/x86_64-unknown-linux-musl/release/jammygit
+          target/x86_64-unknown-linux-musl/release/jammygit --version
+          python3 scripts/smoke_test.py target/x86_64-unknown-linux-musl/release/jammygit

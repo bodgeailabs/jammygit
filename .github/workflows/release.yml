@@ -47,15 +47,19 @@ jobs:
           python-version: '3.13'
       - name: Validate version tag
         run: python3 scripts/release.py version --tag "$RELEASE_TAG"
-      - name: Install Linux static linker
-        if: runner.os == 'Linux'
+      # x86-64 uses Rust's default linker with its bundled musl runtime.
+      # musl-gcc adds an incompatible dynamic loader to x86-64 static PIEs.
+      - name: Install ARM Linux static linker
+        if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
-          echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
           echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc' >> "$GITHUB_ENV"
       - name: Build release binary
         run: cargo build --locked --release --target "$TARGET"
+      - name: Verify Linux binary is static
+        if: runner.os == 'Linux'
+        run: bash scripts/check-static.sh "target/$TARGET/release/jammygit"
       - name: Exercise native release binary
         run: |
           "target/$TARGET/release/jammygit" --version
