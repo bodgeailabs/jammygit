@@ -1,4 +1,6 @@
-# jammygit
+<p align="center">
+  <img src="docs/jammygit-wordmark.png" alt="Jammygit" width="560" />
+</p>
 
 A small Git TUI built with [Ratatui](https://ratatui.rs/). Stage, review, commit, push, pull. Uses the installed Git CLI and your existing Git configuration, credentials, hooks, and signing setup.
 

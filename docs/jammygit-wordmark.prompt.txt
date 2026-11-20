@@ -1,0 +1,14 @@
+Generated with the built-in image_gen tool, with a transparent background.
+
+Final prompt:
+Use case: logo-brand.
+Asset type: original typographic logo for Jammygit, a quick Git terminal app.
+Primary request: an arresting, characterful wordmark that captures "jammy git", the British expression for a cheeky, lucky sod. Convey that attitude through excellent lettering, not literal luck symbols or a character.
+Style direction: the visual confidence of an iconic British independent record sleeve, a well-designed football fanzine, and a cheeky 1990s Britpop headline. Bold, witty, slightly rough around the edges but expertly crafted. A contemporary identity with strong custom typography, not a retro filter or generic software startup logo.
+Text: exactly "jammygit", spelled j-a-m-m-y-g-i-t, all lowercase, one readable product name. No other words.
+Lettering: oversized, tightly kerned, bespoke heavy condensed lettering with characterful slab-like terminals, a slight forward lean, and a few deliberate irregular cuts. Make the opening j and the double m especially distinctive. Use a long confident swash from the j as a simple underline, ending in a small squared terminal-cursor underscore. The overall rhythm should feel like a knowing wink, with a little swagger. Maintain effortless readability; no illegible graffiti.
+Composition: a single compact horizontal wordmark, approximately 3:1, filling the canvas with modest even clear space. Strong silhouette and impressive small-size readability. No surrounding badge or box. The lettering itself is the complete logo.
+Color: saturated Initium cobalt #234e91 and electric royal blue #568DE0, with a restrained warm ivory #F1E9D7 inline accent and a dark navy outline where needed for legibility on both light and dark backgrounds. Flat screen-printed ink colors and crisp edges. Keep the palette small and intentional.
+Background: genuinely transparent alpha, no colored backdrop and no checkerboard baked in.
+Avoid: any mascot, gremlin, creature, face, animal, horseshoe, clover, dice, coin, flat cap, flag, tourist symbol, crown, tea, jam jar, Git diamond, decorative sticker clutter, slogans, 3D, gradients, shadows, glows, mockups, presentation boards, or watermarks. Do not reuse the previous gremlin design. This is a completely new typographic concept.
+
