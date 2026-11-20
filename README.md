@@ -4,7 +4,7 @@
 
 A small Git TUI built with [Ratatui](https://ratatui.rs/). Stage, review, commit, push, pull. Uses the installed Git CLI and your existing Git configuration, credentials, hooks, and signing setup.
 
-The interface takes its blue (`#234e91`) from Initium. Changed files sit in a central conversation-style view, with commit input in a composer below. Use the arrow keys to select a file and Enter to slide in its diff from the right. Commits, pushes, and pulls form a scrollable conversation above the current files and composer, with each request, result, and Git output kept for the current session. Prompts stay inside the app too.
+The interface takes its blue (`#234e91`) from Bodge. Changed files sit in a central conversation-style view, with commit input in a composer below. Use the arrow keys to select a file and Enter to slide in its diff from the right. Commits, pushes, and pulls form a scrollable conversation above the current files and composer, with each request, result, and Git output kept for the current session. Prompts stay inside the app too.
 
 ![Jammygit workspace with sample changes](docs/preview.png)
 
@@ -15,14 +15,14 @@ Releases contain native binaries for macOS (Apple Silicon and Intel, macOS 11+) 
 For a public repository, once the first release is published:
 
 ```sh
-curl -fsSL https://github.com/initiumailab/jammygit/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/bodgeailabs/jammygit/releases/latest/download/install.sh | bash
 ```
 
 For a private repository, use authenticated [GitHub CLI](https://cli.github.com/):
 
 ```sh
 jammygit_installer_dir="$(mktemp -d)"
-gh release download --repo initiumailab/jammygit --pattern install.sh --dir "$jammygit_installer_dir"
+gh release download --repo bodgeailabs/jammygit --pattern install.sh --dir "$jammygit_installer_dir"
 bash "$jammygit_installer_dir/install.sh"
 rm -rf "$jammygit_installer_dir"
 ```
@@ -42,7 +42,7 @@ Run `bash install.sh --help` for all options, including installing from a fork w
 Requires a current stable Rust toolchain, Git 2.23+, and an interactive terminal (at least 64 × 18; 100 × 30 recommended).
 
 ```sh
-cd /Users/sam/code/initiumailab/jammygit
+cd jammygit
 cargo run --release -- /path/to/your/repository
 ```
 
